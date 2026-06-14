@@ -1,0 +1,12 @@
+node_modules/
+/dist/
+/.env
+/.vscode/
+/data/*.db
+frontend/
+backend/
+archivos.txt
+server/node_modules/
+server/data/
+server/.env
+graphql/
