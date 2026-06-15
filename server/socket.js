@@ -1,3 +1,4 @@
+// server/socket.js — sin pairing forzado, mensajes directos por usuario
 const { WebSocketServer } = require('ws');
 const {
   getMessages,
@@ -9,13 +10,9 @@ const {
 } = require('./data/storage');
 
 const users = new Map();
-let messageBroadcaster = null;
-const waitingQueue = [];
 let persistedUsers = loadPersistedUsers();
 
-function getUser(name) {
-  return users.get(name);
-}
+// ─── helpers ────────────────────────────────────────────────────────────────
 
 function formatUser(user) {
   return {
@@ -27,19 +24,15 @@ function formatUser(user) {
 
 function getAllKnownUsers() {
   const all = new Map();
-  persistedUsers.forEach((user) => {
-    all.set(user.name, { ...user });
-  });
-
-  users.forEach((user, name) => {
-    all.set(name, { ...all.get(name), name, online: true, lastSeen: null });
-  });
-
+  persistedUsers.forEach((u) => all.set(u.name, { ...u }));
+  users.forEach((u, name) =>
+    all.set(name, { ...all.get(name), name, online: true, lastSeen: null })
+  );
   return Array.from(all.values()).map(formatUser);
 }
 
 function persistUser(name, online, lastSeen = null) {
-  const existing = persistedUsers.find((user) => user.name === name);
+  const existing = persistedUsers.find((u) => u.name === name);
   if (existing) {
     existing.online = online;
     existing.lastSeen = lastSeen;
@@ -49,67 +42,50 @@ function persistUser(name, online, lastSeen = null) {
   saveUsers(persistedUsers);
 }
 
-function deliverPendingMessages(name) {
-  const pending = getPendingMessagesForUser(name);
-  if (!pending.length) return;
-
-  pending.forEach((message) => {
-    const updated = updateMessageStatus(message.id, 'delivered');
-    if (!updated) return;
-
-    sendToUser(name, { type: 'private_message', message: updated });
-    sendToUser(updated.from, {
-      type: 'message-status',
-      messageId: updated.id,
-      status: 'delivered'
-    });
-  });
-}
-
 function broadcastUsers() {
-  const payload = getAllKnownUsers().map(formatUser);
-  const data = JSON.stringify({ type: 'users', users: payload });
-
-  for (const user of users.values()) {
-    if (user.online) {
-      user.ws.send(data);
+  const payload = JSON.stringify({ type: 'users', users: getAllKnownUsers() });
+  for (const u of users.values()) {
+    if (u.online && u.ws) {
+      try { u.ws.send(payload); } catch (_) {}
     }
   }
 }
 
-function setMessageBroadcaster(fn) {
-  messageBroadcaster = fn;
-}
-
-function broadcastMessage(message) {
-  if (typeof messageBroadcaster === 'function') {
-    messageBroadcaster(message);
-  }
-}
-
 function sendToUser(name, data) {
-  const user = getUser(name);
-  if (!user || !user.online) return false;
-
+  const user = users.get(name);
+  if (!user || !user.online || !user.ws) return false;
   try {
     user.ws.send(JSON.stringify(data));
     return true;
   } catch (err) {
-    console.error('Error enviando WS a', name, err);
+    console.error('WS send error ->', name, err.message);
     return false;
   }
 }
+
+function deliverPendingMessages(name) {
+  const pending = getPendingMessagesForUser(name);
+  pending.forEach((msg) => {
+    const updated = updateMessageStatus(msg.id, 'delivered');
+    if (!updated) return;
+    sendToUser(name, { type: 'private_message', message: updated });
+    sendToUser(updated.from, { type: 'message-status', messageId: updated.id, status: 'delivered' });
+  });
+}
+
+// ─── socket server ───────────────────────────────────────────────────────────
 
 function initSocket(server) {
   const wss = new WebSocketServer({ server, path: '/ws' });
 
   wss.on('connection', (ws) => {
-    console.log('Usuario conectado');
+    console.log('Conexión WebSocket abierta');
 
     ws.on('message', (raw) => {
       try {
         const data = JSON.parse(raw.toString());
 
+        // ── JOIN ──────────────────────────────────────────────────────────
         if (data.type === 'join') {
           const name = String(data.name || '').trim();
           if (!name) {
@@ -117,54 +93,24 @@ function initSocket(server) {
             return;
           }
 
-          const oldName = ws.userName;
-          if (oldName && oldName !== name) {
-            users.delete(oldName);
-            const oldQueueIndex = waitingQueue.indexOf(oldName);
-            if (oldQueueIndex !== -1) waitingQueue.splice(oldQueueIndex, 1);
-          }
-
+          // Si ya hay una sesión activa con ese nombre, la rechazamos
           const existing = users.get(name);
           if (existing?.online && existing.ws !== ws) {
             ws.send(JSON.stringify({ type: 'error', message: 'Ese nombre ya está en uso.' }));
             return;
           }
 
-          // register user
-          users.set(name, {
-            name,
-            ws,
-            online: true,
-            lastSeen: null,
-            partner: null
-          });
+          // Si el mismo WS ya tenía otro nombre, lo limpiamos
+          if (ws.userName && ws.userName !== name) {
+            users.delete(ws.userName);
+          }
 
+          users.set(name, { name, ws, online: true, lastSeen: null });
           ws.userName = name;
           persistUser(name, true, null);
 
-          // if someone is waiting, pair them
-          if (waitingQueue.length > 0) {
-            const otherName = waitingQueue.shift();
-            const other = users.get(otherName);
-
-            if (other && other.online) {
-              users.get(name).partner = otherName;
-              other.partner = name;
-
-              // notify both
-              ws.send(JSON.stringify({ type: 'matched', partner: otherName }));
-              other.ws.send(JSON.stringify({ type: 'matched', partner: name }));
-              console.log(`Emparejados: ${name} <-> ${otherName}`);
-            } else {
-              // other went offline, push this user to waiting
-              waitingQueue.push(name);
-              ws.send(JSON.stringify({ type: 'waiting' }));
-            }
-          } else {
-            // no one waiting, add to queue
-            waitingQueue.push(name);
-            ws.send(JSON.stringify({ type: 'waiting' }));
-          }
+          // Confirmación al cliente que entró
+          ws.send(JSON.stringify({ type: 'joined', name }));
 
           broadcastUsers();
           deliverPendingMessages(name);
@@ -173,22 +119,21 @@ function initSocket(server) {
 
         if (!ws.userName) return;
 
-        // message sent to partner (pairing mode) - compatible with previous client
+        // ── PRIVATE MESSAGE ───────────────────────────────────────────────
         if (data.type === 'message' || data.type === 'private_message') {
           const from = ws.userName;
-          const user = users.get(from);
-          const partnerName = user?.partner || String(data.to || '').trim();
+          const to = String(data.to || '').trim();
           const text = String(data.text || '').trim();
-          if (!partnerName || !text) return;
+          if (!to || !text) return;
 
-          const partner = users.get(partnerName);
-          const isOnline = partner?.online && !!partner.ws;
+          const recipient = users.get(to);
+          const isOnline = recipient?.online && !!recipient.ws;
           const status = isOnline ? 'delivered' : 'pending';
 
           const message = {
-            id: Date.now().toString(),
+            id: Date.now().toString() + Math.random().toString(36).slice(2),
             from,
-            to: partnerName,
+            to,
             text,
             createdAt: new Date().toISOString(),
             status
@@ -198,10 +143,8 @@ function initSocket(server) {
           messages.push(message);
           saveMessages(messages);
 
-          // Send to recipient only
           if (isOnline) {
-            const payload = { type: 'private_message', message };
-            sendToUser(partnerName, payload);
+            sendToUser(to, { type: 'private_message', message });
             ws.send(JSON.stringify({ type: 'message-status', messageId: message.id, status: 'delivered' }));
           } else {
             ws.send(JSON.stringify({ type: 'message-status', messageId: message.id, status: 'pending' }));
@@ -209,30 +152,29 @@ function initSocket(server) {
           return;
         }
 
-        // typing indicator to partner
+        // ── TYPING ────────────────────────────────────────────────────────
         if (data.type === 'typing') {
-          const from = ws.userName;
-          const user = users.get(from);
-          const partnerName = user?.partner;
-          if (!partnerName) return;
-
-          sendToUser(partnerName, { type: 'typing', from });
+          const to = String(data.to || '').trim();
+          if (!to) return;
+          sendToUser(to, { type: 'typing', from: ws.userName });
           return;
         }
 
-        // seen notification to partner
+        // ── SEEN ──────────────────────────────────────────────────────────
         if (data.type === 'seen') {
-          const from = ws.userName;
-          const user = users.get(from);
-          const partnerName = user?.partner;
+          const to = String(data.to || '').trim();
           const messageId = String(data.messageId || '').trim();
-          if (!partnerName || !messageId) return;
+          if (!to || !messageId) return;
 
-          sendToUser(partnerName, { type: 'seen', from, messageId });
+          const updated = updateMessageStatus(messageId, 'seen');
+          if (updated) {
+            sendToUser(to, { type: 'message-status', messageId, status: 'seen' });
+          }
           return;
         }
+
       } catch (err) {
-        console.error(err);
+        console.error('WS message error:', err);
       }
     });
 
@@ -241,45 +183,14 @@ function initSocket(server) {
       if (name) {
         const existing = users.get(name);
         if (existing) {
-          const partnerName = existing.partner;
-          if (partnerName) {
-            const partner = users.get(partnerName);
-            if (partner && partner.online && partner.ws) {
-              try {
-                partner.ws.send(JSON.stringify({ type: 'partner-disconnected' }));
-              } catch (e) {}
-
-              partner.partner = null;
-              waitingQueue.push(partnerName);
-            }
-          }
-
-          users.set(name, {
-            ...existing,
-            online: false,
-            ws: null,
-            lastSeen: new Date().toISOString(),
-            partner: null
-          });
+          users.set(name, { ...existing, online: false, ws: null, lastSeen: new Date().toISOString() });
           persistUser(name, false, new Date().toISOString());
         }
-
-        const idx = waitingQueue.indexOf(name);
-        if (idx !== -1) waitingQueue.splice(idx, 1);
-
         broadcastUsers();
       }
-
-      console.log('Usuario desconectado');
+      console.log('Conexión WebSocket cerrada:', name || '(anónimo)');
     });
   });
 }
 
-module.exports = {
-  initSocket,
-  setMessageBroadcaster,
-  sendToUser,
-  getUser,
-  broadcastUsers,
-  broadcastMessage
-};
+module.exports = { initSocket, sendToUser, broadcastUsers };

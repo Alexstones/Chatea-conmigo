@@ -4,15 +4,19 @@
   "private": true,
   "scripts": {
     "dev": "npm-run-all --parallel dev:frontend dev:server",
-    "dev:frontend": "npm run dev --prefix frontend",
-    "dev:server": "npm run dev --prefix server",
+    "dev:frontend": "vite",
+    "dev:server": "node server/index.js",
     "start": "npm run dev"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.2",
     "concurrently": "^8.2.0",
-    "npm-run-all": "^4.1.5"
+    "npm-run-all": "^4.1.5",
+    "vite": "^8.0.16"
   },
   "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "ws": "^8.21.0"
   }
 }

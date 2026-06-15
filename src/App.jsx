@@ -3,360 +3,477 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 const WS_URL = 'ws://localhost:4000/ws';
 const GRAPHQL_URL = 'http://localhost:4000/graphql';
 
-function formatLastSeen(timestamp) {
-  if (!timestamp) return 'Desconectado';
-  const diff = Date.now() - new Date(timestamp).getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return 'Hace unos segundos';
-  if (minutes === 1) return 'Hace 1 min';
-  if (minutes < 60) return `Hace ${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  return hours === 1 ? 'Hace 1 hora' : `Hace ${hours} horas`;
+// ─── utils ──────────────────────────────────────────────────────────────────
+function formatLastSeen(ts) {
+  if (!ts) return 'Desconectado';
+  const diff = Date.now() - new Date(ts).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'Hace unos segundos';
+  if (mins === 1) return 'Hace 1 min';
+  if (mins < 60) return `Hace ${mins} min`;
+  const hrs = Math.floor(mins / 60);
+  return hrs === 1 ? 'Hace 1 hora' : `Hace ${hrs} horas`;
 }
 
-function App() {
-  const [name, setName] = useState('');
-  const [stage, setStage] = useState('entry');
-  const [users, setUsers] = useState([]);
-  const [selectedUser, setSelectedUser] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [draft, setDraft] = useState('');
-  const [typingFrom, setTypingFrom] = useState('');
-  const [search, setSearch] = useState('');
-  const [statusMessage, setStatusMessage] = useState('Conectando...');
-  const [unreadCounts, setUnreadCounts] = useState({});
+function timeLabel(iso) {
+  return new Date(iso).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+}
 
-  const socketRef = useRef(null);
-  const typingTimeout = useRef(null);
-  const messagesEnd = useRef(null);
-  const nameRef = useRef(name);
-  const selectedUserRef = useRef(selectedUser);
+function StatusIcon({ status }) {
+  if (status === 'seen')      return <span className="msg-status seen" title="Visto">✓✓ visto</span>;
+  if (status === 'delivered') return <span className="msg-status delivered" title="Entregado">✓✓</span>;
+  return <span className="msg-status pending" title="Pendiente">✓</span>;
+}
 
+// ─── App ────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [myName, setMyName]       = useState('');
+  const [stage, setStage]         = useState('entry'); // 'entry' | 'chat'
+  const [nameInput, setNameInput] = useState('');
+  const [connStatus, setConnStatus] = useState('Conectando...');
+
+  const [users, setUsers]         = useState([]);      // lista completa de usuarios
+  const [search, setSearch]       = useState('');
+
+  // Conversaciones abiertas como pestañas
+  const [openChats, setOpenChats]   = useState([]);    // string[]
+  const [activeChat, setActiveChat] = useState(null);  // string | null
+
+  // Mensajes por usuario: { [userName]: Message[] }
+  const [msgMap, setMsgMap]         = useState({});
+  const [typingMap, setTypingMap]   = useState({});
+  const [unreadMap, setUnreadMap]   = useState({});
+
+  // Ref siempre actualizado para evitar closures estancados
+  const msgMapRef = useRef({});
+
+  const wsRef          = useRef(null);
+  const myNameRef      = useRef(myName);
+  const activeChatRef  = useRef(activeChat);
+  const typingTimers   = useRef({});
+  const messagesEndRef = useRef(null);
+
+  useEffect(() => { myNameRef.current = myName; },         [myName]);
+  useEffect(() => { activeChatRef.current = activeChat; },  [activeChat]);
+  useEffect(() => { msgMapRef.current = msgMap; },           [msgMap]);
+
+  // ── WebSocket ──────────────────────────────────────────────────────────────
   useEffect(() => {
-    nameRef.current = name;
-  }, [name]);
+    if (!myName) return; // Solo conectar si hay un nombre configurado
 
-  useEffect(() => {
-    selectedUserRef.current = selectedUser;
-  }, [selectedUser]);
-
-  useEffect(() => {
     const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
 
-    ws.onopen = () => {
-      setStatusMessage('Conectado al servidor');
+    ws.onopen  = () => {
+      setConnStatus('Conectado ✓');
+      // En cuanto abre, nos registramos
+      ws.send(JSON.stringify({ type: 'join', name: myName }));
     };
+    
+    ws.onerror = () => setConnStatus('Error de conexión');
+    ws.onclose = () => setConnStatus('Desconectado');
 
-    ws.onerror = () => {
-      setStatusMessage('Error en la conexión WebSocket');
-    };
+    ws.onmessage = (evt) => {
+      const data = JSON.parse(evt.data);
 
-    ws.onclose = () => {
-      setStatusMessage('Conexión cerrada');
-    };
-
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-
-      if (data.type === 'users') {
-        const filtered = data.users.filter((user) => user.name !== nameRef.current);
-        setUsers(filtered);
+      if (data.type === 'joined') {
+        setStage('chat');
         return;
       }
 
-      if (data.type === 'joined') {
-        setStatusMessage(`Bienvenido, ${data.name}`);
-        setStage('chat');
+      if (data.type === 'users') {
+        setUsers(data.users.filter(u => u.name !== myNameRef.current));
         return;
       }
 
       if (data.type === 'error') {
         alert(data.message);
+        // Si hay error al unirse (ej. nombre en uso), volvemos a la entrada
+        setMyName('');
+        setStage('entry');
         return;
       }
 
       if (data.type === 'private_message') {
-        const incoming = data.message;
-        if (incoming.from === selectedUserRef.current || incoming.to === nameRef.current) {
-          setMessages((prev) => [...prev, incoming]);
+        const msg = data.message;
+        const partner = msg.from === myNameRef.current ? msg.to : msg.from;
+
+        setMsgMap(prev => ({
+          ...prev,
+          [partner]: [...(prev[partner] || []), msg]
+        }));
+
+        // Si no es la pestaña activa, incrementar unread y abrir chat
+        if (partner !== activeChatRef.current) {
+          setUnreadMap(prev => ({ ...prev, [partner]: (prev[partner] || 0) + 1 }));
+          setOpenChats(prev => prev.includes(partner) ? prev : [...prev, partner]);
         }
 
-        if (incoming.from !== selectedUserRef.current) {
-          setUnreadCounts((prev) => ({
-            ...prev,
-            [incoming.from]: (prev[incoming.from] || 0) + 1
-          }));
+        // Marcar como visto si es la pestaña activa
+        if (msg.from !== myNameRef.current && partner === activeChatRef.current) {
+          ws.send(JSON.stringify({ type: 'seen', to: msg.from, messageId: msg.id }));
         }
+        return;
+      }
 
+      if (data.type === 'message-status') {
+        const { messageId, status } = data;
+        setMsgMap(prev => {
+          const updated = { ...prev };
+          for (const key of Object.keys(updated)) {
+            updated[key] = updated[key].map(m =>
+              m.id === messageId ? { ...m, status } : m
+            );
+          }
+          return updated;
+        });
         return;
       }
 
       if (data.type === 'typing') {
-        if (data.from === selectedUserRef.current) {
-          setTypingFrom(data.from);
-          clearTimeout(typingTimeout.current);
-          typingTimeout.current = setTimeout(() => {
-            setTypingFrom('');
-          }, 1400);
-        }
-        return;
-      }
-
-      if (data.type === 'seen') {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === data.messageId
-              ? { ...msg, status: 'seen' }
-              : msg
-          )
-        );
+        const from = data.from;
+        setTypingMap(prev => ({ ...prev, [from]: true }));
+        clearTimeout(typingTimers.current[from]);
+        typingTimers.current[from] = setTimeout(() => {
+          setTypingMap(prev => ({ ...prev, [from]: false }));
+        }, 2000);
         return;
       }
     };
 
-    socketRef.current = ws;
     return () => {
       ws.close();
-      clearTimeout(typingTimeout.current);
+      Object.values(typingTimers.current).forEach(clearTimeout);
     };
-  }, []);
+  }, [myName]);
 
+  // Scroll al fondo cuando llegan mensajes
   useEffect(() => {
-    messagesEnd.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [msgMap, activeChat]);
 
-  const filteredUsers = useMemo(() => {
-    return users.filter((user) =>
-      user.name.toLowerCase().includes(search.toLowerCase())
-    );
-  }, [users, search]);
-
+  // ── Acciones ───────────────────────────────────────────────────────────────
   const enterChat = () => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    setName(trimmed);
-    socketRef.current?.send(
-      JSON.stringify({ type: 'join', name: trimmed })
-    );
+    const name = nameInput.trim();
+    if (!name) return;
+    myNameRef.current = name;
+    setMyName(name); // Esto disparará el useEffect del WebSocket
   };
 
-  const loadMessages = async (otherUser) => {
-    if (!otherUser) return;
+  const openChat = async (userName) => {
+    setActiveChat(userName);
+    setOpenChats(prev => prev.includes(userName) ? prev : [...prev, userName]);
+    setUnreadMap(prev => { const n = { ...prev }; delete n[userName]; return n; });
 
-    setSelectedUser(otherUser);
-    setUnreadCounts((prev) => {
-      const updated = { ...prev };
-      delete updated[otherUser];
-      return updated;
-    });
+    const current = msgMapRef.current[userName];
 
-    try {
-      const query = `query Messages($user1: String!, $user2: String!) { messages(user1: $user1, user2: $user2) { id from to text createdAt status } }`;
-      const response = await fetch(GRAPHQL_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query,
-          variables: { user1: name, user2: otherUser }
-        })
-      });
-      const result = await response.json();
-      const loadedMessages = result.data?.messages || [];
-      setMessages(loadedMessages);
-      const latestIncoming = [...loadedMessages]
-        .reverse()
-        .find((message) => message.from === otherUser);
+    if (!current) {
+      // Primera vez: cargar historial desde GraphQL
+      try {
+        const query = `query M($user1:String!,$user2:String!){messages(user1:$user1,user2:$user2){id from to text createdAt status}}`;
+        const res = await fetch(GRAPHQL_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, variables: { user1: myNameRef.current, user2: userName } })
+        });
+        const { data } = await res.json();
+        const loaded = data?.messages || [];
+        setMsgMap(prev => ({ ...prev, [userName]: loaded }));
 
-      if (latestIncoming) {
-        socketRef.current?.send(
-          JSON.stringify({
-            type: 'seen',
-            to: otherUser,
-            messageId: latestIncoming.id
-          })
-        );
+        const last = [...loaded].reverse().find(m => m.from === userName);
+        if (last) {
+          wsRef.current?.send(JSON.stringify({ type: 'seen', to: userName, messageId: last.id }));
+        }
+      } catch (e) {
+        // Si falla GraphQL igual mostramos el chat vacío
+        setMsgMap(prev => ({ ...prev, [userName]: prev[userName] || [] }));
+        console.error('Error cargando historial', e);
       }
-    } catch (error) {
-      console.error('Error cargando historial', error);
+    } else {
+      // Ya tenemos mensajes — marcar el último como visto
+      const last = [...current].reverse().find(m => m.from === userName);
+      if (last) {
+        wsRef.current?.send(JSON.stringify({ type: 'seen', to: userName, messageId: last.id }));
+      }
     }
+  };
+
+  const closeChat = (userName, e) => {
+    e?.stopPropagation();
+    setOpenChats(prev => prev.filter(n => n !== userName));
+    if (activeChat === userName) {
+      const remaining = openChats.filter(n => n !== userName);
+      setActiveChat(remaining[remaining.length - 1] ?? null);
+    }
+  };
+
+  const [draft, setDraft] = useState('');
+  const typingDebounce = useRef(null);
+
+  const handleDraft = (val) => {
+    setDraft(val);
+    if (!activeChat) return;
+    wsRef.current?.send(JSON.stringify({ type: 'typing', to: activeChat }));
+    clearTimeout(typingDebounce.current);
   };
 
   const sendMessage = async () => {
-    if (!draft.trim() || !selectedUser) return;
+    const text = draft.trim();
+    if (!text || !activeChat) return;
 
-    const newMessage = {
-      id: Date.now().toString(),
-      from: name,
-      to: selectedUser,
-      text: draft.trim(),
+    const optimistic = {
+      id: Date.now().toString() + Math.random().toString(36).slice(2),
+      from: myName,
+      to: activeChat,
+      text,
       createdAt: new Date().toISOString(),
-      status: 'sent'
+      status: 'pending'
     };
 
-    setMessages((prev) => [...prev, newMessage]);
+    setMsgMap(prev => ({ ...prev, [activeChat]: [...(prev[activeChat] || []), optimistic] }));
     setDraft('');
 
-    socketRef.current?.send(
-      JSON.stringify({
-        type: 'private_message',
-        to: selectedUser,
-        text: newMessage.text
-      })
-    );
+    wsRef.current?.send(JSON.stringify({ type: 'private_message', to: activeChat, text }));
 
     try {
-      const mutation = `mutation SendMessage($from: String!, $to: String!, $text: String!) { sendMessage(from: $from, to: $to, text: $text) { id from to text createdAt status } }`;
+      const mutation = `mutation S($from:String!,$to:String!,$text:String!){sendMessage(from:$from,to:$to,text:$text){id from to text createdAt status}}`;
       await fetch(GRAPHQL_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: mutation,
-          variables: {
-            from: name,
-            to: selectedUser,
-            text: newMessage.text
-          }
-        })
+        body: JSON.stringify({ query: mutation, variables: { from: myName, to: activeChat, text } })
       });
-    } catch (error) {
-      console.error('Error enviando mensaje', error);
+    } catch (e) {
+      console.error('Error enviando mensaje', e);
     }
   };
 
-  const handleTyping = (value) => {
-    setDraft(value);
-    if (!selectedUser) return;
-    socketRef.current?.send(
-      JSON.stringify({ type: 'typing', to: selectedUser })
-    );
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
   };
 
-  const connectionInfo = users.some((user) => user.online)
-    ? 'Esperando que elijas un usuario conectado'
-    : 'Ningún usuario conectado todavía';
+  const logout = () => {
+    wsRef.current?.close();
+    setStage('entry');
+    setMyName('');
+    setNameInput('');
+    setOpenChats([]);
+    setActiveChat(null);
+  };
 
+  // ── Derived ────────────────────────────────────────────────────────────────
+  const filteredUsers = useMemo(() => {
+    const q = search.toLowerCase();
+    const sorted = [...users].sort((a, b) => {
+      if (a.online === b.online) return a.name.localeCompare(b.name);
+      return a.online ? -1 : 1;
+    });
+    return q ? sorted.filter(u => u.name.toLowerCase().includes(q)) : sorted;
+  }, [users, search]);
+
+  const activeMsgs   = activeChat ? (msgMap[activeChat] || []) : [];
+  const activeUser   = users.find(u => u.name === activeChat);
+  const isTyping     = activeChat ? !!typingMap[activeChat] : false;
+  const totalUnread  = Object.values(unreadMap).reduce((a, b) => a + b, 0);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ENTRY SCREEN
   if (stage === 'entry') {
     return (
       <div className="screen">
         <div className="card">
-          <div className="brand">Chat Privado</div>
-          <p>Ingresa tu nombre para conectarte al chat privado.</p>
+          <div className="brand">Chatea Conmigo</div>
+          <p>Ingresa tu nombre para conectarte.</p>
           <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Tu nombre"
+            id="name-input"
+            value={nameInput}
+            onChange={e => setNameInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && enterChat()}
+            placeholder="Tu nombre..."
+            autoFocus
           />
-          <button onClick={enterChat}>Entrar</button>
+          <button id="enter-btn" onClick={enterChat} style={{ marginTop: 14, width: '100%' }}>
+            Entrar al chat
+          </button>
+          <p style={{ fontSize: '0.85rem', color: '#64748b', marginTop: 16, marginBottom: 0 }}>
+            Estado: {connStatus}
+          </p>
         </div>
       </div>
     );
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // CHAT SCREEN
   return (
-    <div className="screen chat-screen">
-      <aside className="sidebar">
-        <div className="brand">Chat Privado</div>
-        <p className="status">{statusMessage}</p>
-        <div className="sidebar-profile">
-          <div className="user-avatar">{name.charAt(0).toUpperCase()}</div>
-          <div>
-            <strong>{name}</strong>
-            <div className="status-text">🟢 En línea</div>
-          </div>
-        </div>
+    <div className="layout">
 
-        <input
-          className="user-search"
-          placeholder="Buscar usuarios"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      {/* ── SIDEBAR ─────────────────────────────────────────────────────── */}
+      <aside className="sidebar">
+        <div className="sidebar-top">
+          <div className="brand">Chatea Conmigo</div>
+          <div className="sidebar-profile">
+            <div className="avatar">{myName.charAt(0).toUpperCase()}</div>
+            <div style={{ flex: 1, overflow: 'hidden' }}>
+              <strong>{myName}</strong>
+              <div className="online-dot">🟢 En línea</div>
+            </div>
+            <button 
+              onClick={logout} 
+              style={{ padding: '6px 10px', fontSize: '0.75rem', borderRadius: '8px', background: 'rgba(248,113,113,0.15)', color: '#f87171' }}
+              title="Cambiar de usuario"
+            >
+              Salir
+            </button>
+          </div>
+          <input
+            className="search-input"
+            placeholder="🔍 Buscar usuarios..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+        </div>
 
         <div className="user-list">
           {filteredUsers.length === 0 && (
-            <div className="empty-state">{connectionInfo}</div>
+            <div className="empty-hint">Sin usuarios todavía</div>
           )}
+          {filteredUsers.map(user => {
+            const unread = unreadMap[user.name] || 0;
+            const isActive = activeChat === user.name;
+            const isOpen = openChats.includes(user.name);
+            return (
+              <button
+                key={user.name}
+                id={`user-${user.name}`}
+                className={`user-row ${isActive ? 'active' : ''} ${isOpen && !isActive ? 'open' : ''}`}
+                onClick={() => openChat(user.name)}
+              >
+                <div className="avatar sm">
+                  {user.name.charAt(0).toUpperCase()}
+                  <span className={`status-dot ${user.online ? 'online' : 'offline'}`} />
+                </div>
+                <div className="user-info">
+                  <strong>{user.name}</strong>
+                  <span className="last-seen">
+                    {user.online ? '🟢 En línea' : `⚫ ${formatLastSeen(user.lastSeen)}`}
+                  </span>
+                </div>
+                {unread > 0 && <span className="badge">{unread}</span>}
+              </button>
+            );
+          })}
+        </div>
 
-          {filteredUsers.map((user) => (
-            <button
-              key={user.name}
-              className={`user-card ${user.name === selectedUser ? 'active' : ''}`}
-              onClick={() => loadMessages(user.name)}
-            >
-              <div className="user-avatar">{user.name.charAt(0).toUpperCase()}</div>
-              <div className="user-meta">
-                <strong>{user.name}</strong>
-                <span>
-                  {user.online
-                    ? '🟢 En línea'
-                    : `⚫ ${formatLastSeen(user.lastSeen)}`}
-                </span>
-              </div>
-              {unreadCounts[user.name] > 0 && (
-                <span className="unread-count">
-                  {unreadCounts[user.name]}
-                </span>
-              )}
-            </button>
-          ))}
+        <div className="sidebar-footer">
+          <span>{connStatus}</span>
         </div>
       </aside>
 
-      <main className="chat-panel">
-        <div className="chat-header">
-          <div>
-            <div className="brand">{selectedUser ? `Conversación con ${selectedUser}` : 'Selecciona un usuario'}</div>
-            <p>{selectedUser ? 'Historial privado 1 a 1' : 'Elige un contacto para abrir la conversación'}</p>
-          </div>
-        </div>
+      {/* ── MAIN PANEL ──────────────────────────────────────────────────── */}
+      <main className="main-panel">
 
-        <section className="messages">
-          {selectedUser ? (
-            messages.length > 0 ? (
-              messages.map((message) => (
-                <article
-                  key={message.id}
-                  className={`bubble ${message.from === name ? 'mine' : ''}`}
+        {/* Chat tabs */}
+        {openChats.length > 0 && (
+          <div className="tabs-bar">
+            {openChats.map(name => {
+              const unread = unreadMap[name] || 0;
+              const u = users.find(u => u.name === name);
+              return (
+                <button
+                  key={name}
+                  id={`tab-${name}`}
+                  className={`tab ${activeChat === name ? 'tab-active' : ''}`}
+                  onClick={() => openChat(name)}
                 >
-                  <div className="bubble-top">
-                    <span>{message.from}</span>
-                    <span>{new Date(message.createdAt).toLocaleTimeString()}</span>
-                  </div>
-                  <p>{message.text}</p>
-                  {message.from === name && (
-                    <div className="message-meta">
-                      {message.status === 'seen' ? '✓✓ visto' : '✓'}
+                  <span className={`tab-dot ${u?.online ? 'online' : 'offline'}`} />
+                  {name}
+                  {unread > 0 && <span className="tab-badge">{unread}</span>}
+                  <span
+                    className="tab-close"
+                    role="button"
+                    onClick={(e) => closeChat(name, e)}
+                    title="Cerrar"
+                  >✕</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Chat panel */}
+        {activeChat ? (
+          <div className="chat-panel">
+            {/* Header */}
+            <div className="chat-header">
+              <div className="avatar">{activeChat.charAt(0).toUpperCase()}</div>
+              <div>
+                <strong>Conversación con {activeChat}</strong>
+                <div className="last-seen">
+                  {activeUser?.online
+                    ? '🟢 En línea'
+                    : `⚫ ${formatLastSeen(activeUser?.lastSeen)}`}
+                </div>
+              </div>
+            </div>
+
+            {/* Messages */}
+            <section className="messages" id="messages-panel">
+              {activeMsgs.length === 0
+                ? <div className="empty-hint">No hay mensajes aún. ¡Saluda!</div>
+                : activeMsgs.map(msg => (
+                  <article
+                    key={msg.id}
+                    className={`bubble ${msg.from === myName ? 'mine' : 'theirs'}`}
+                  >
+                    <div className="bubble-meta">
+                      <span className="bubble-time">{timeLabel(msg.createdAt)}</span>
                     </div>
-                  )}
-                </article>
-              ))
-            ) : (
-              <div className="empty-state">No hay mensajes en esta conversación aún.</div>
-            )
-          ) : (
-            <div className="empty-state">Selecciona un usuario para iniciar un chat privado.</div>
-          )}
-          <div ref={messagesEnd} />
-        </section>
+                    <p>{msg.text}</p>
+                    {msg.from === myName && <StatusIcon status={msg.status} />}
+                  </article>
+                ))
+              }
+              {isTyping && (
+                <div className="typing-indicator">
+                  <span /><span /><span />
+                  <em>{activeChat} está escribiendo...</em>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </section>
 
-        <footer className="composer">
-          <textarea
-            value={draft}
-            onChange={(e) => handleTyping(e.target.value)}
-            placeholder={selectedUser ? 'Escribe un mensaje...' : 'Selecciona un usuario primero'}
-            disabled={!selectedUser}
-          />
-          <button onClick={sendMessage} disabled={!selectedUser || !draft.trim()}>
-            Enviar
-          </button>
-        </footer>
-
-        {typingFrom && selectedUser && (
-          <div className="typing-banner">{typingFrom} está escribiendo...</div>
+            {/* Composer */}
+            <footer className="composer">
+              <textarea
+                id="message-input"
+                value={draft}
+                onChange={e => handleDraft(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Escribe un mensaje... (Enter para enviar)"
+                rows={2}
+              />
+              <button
+                id="send-btn"
+                onClick={sendMessage}
+                disabled={!draft.trim()}
+                className="send-btn"
+              >
+                Enviar ↑
+              </button>
+            </footer>
+          </div>
+        ) : (
+          <div className="no-chat">
+            <div className="no-chat-icon">✉</div>
+            <h2>Selecciona un usuario</h2>
+            <p>Elige un contacto de la barra lateral para iniciar una conversación.<br />
+              Puedes tener múltiples chats abiertos al mismo tiempo.</p>
+          </div>
         )}
       </main>
     </div>
   );
 }
-
-export default App;
