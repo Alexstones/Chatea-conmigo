@@ -7,8 +7,8 @@ const { expressMiddleware } = require('@apollo/server/express4');
 const bodyParser = require('body-parser');
 const { makeExecutableSchema } = require('@graphql-tools/schema');
 const { typeDefs } = require('./graphql/schema');
-const { resolvers } = require('./graphql/resolvers');
-const { initSocket } = require('./socket');
+const resolvers = require('./graphql/resolvers');
+const { initSocket } = require('./websocket/connection');
 
 const app = express();
 app.use(cors());
