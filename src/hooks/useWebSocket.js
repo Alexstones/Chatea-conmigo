@@ -1,6 +1,10 @@
 import { useEffect, useRef } from 'react';
 
-const WS_URL = 'ws://localhost:4000/ws';
+// Magia pura: Si estamos en local usa localhost, si es Render usa la URL real
+const IS_DEV = import.meta.env.DEV;
+const WS_URL = IS_DEV 
+  ? 'ws://localhost:4000/ws' 
+  : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
 export function useWebSocket({ state }) {
   const wsRef = useRef(null);
