@@ -7,7 +7,6 @@ function getMessages() {
   if (!fs.existsSync(file)) {
     fs.writeFileSync(file, '[]');
   }
-
   return JSON.parse(fs.readFileSync(file));
 }
 
@@ -24,7 +23,6 @@ const resolvers = {
 
   Mutation: {
     sendMessage(_, { author, text }) {
-
       const messages = getMessages();
 
       const message = {
@@ -35,7 +33,6 @@ const resolvers = {
       };
 
       messages.push(message);
-
       saveMessages(messages);
 
       global.broadcastMessage(message);
