@@ -1,4 +1,4 @@
-const userRepository = require('../data/userRepository');
+const storage = require('../data/storage');
 
 class UserService {
   constructor() {
@@ -15,8 +15,8 @@ class UserService {
 
   getAllKnownUsers() {
     const all = new Map();
-    // Leer los guardados
-    userRepository.readAll().forEach((u) => all.set(u.name, { ...u }));
+    // Leer los guardados usando la función correcta de storage.js
+    storage.getUsers().forEach((u) => all.set(u.name, { ...u }));
     // Mezclar con los activos en memoria
     this.activeSockets.forEach((u, name) => {
       all.set(name, { ...all.get(name), name, online: true, lastSeen: null });
@@ -25,7 +25,7 @@ class UserService {
   }
 
   persistUser(name, online, lastSeen = null) {
-    const users = userRepository.readAll();
+    const users = storage.getUsers();
     const existing = users.find((u) => u.name === name);
     if (existing) {
       existing.online = online;
@@ -33,7 +33,7 @@ class UserService {
     } else {
       users.push({ name, online, lastSeen });
     }
-    userRepository.saveAll(users);
+    storage.saveUsers(users);
   }
 
   registerSocket(name, ws) {

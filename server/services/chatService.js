@@ -1,4 +1,4 @@
-const messageRepository = require('../data/messageRepository');
+const storage = require('../data/storage');
 const userService = require('./userService');
 
 class ChatService {
@@ -24,7 +24,10 @@ class ChatService {
       status
     };
 
-    messageRepository.save(message);
+    // Obtener array, agregar mensaje y guardar (usando funciones de storage)
+    const messages = storage.getMessages();
+    messages.push(message);
+    storage.saveMessages(messages);
 
     if (isOnline && this.messageBroadcaster) {
       this.messageBroadcaster(to, { type: 'private_message', message });
@@ -36,9 +39,9 @@ class ChatService {
   deliverPendingMessages(userName) {
     if (!this.messageBroadcaster) return;
 
-    const pending = messageRepository.findPendingForUser(userName);
+    const pending = storage.getPendingMessagesForUser(userName);
     pending.forEach((msg) => {
-      const updated = messageRepository.updateStatus(msg.id, 'delivered');
+      const updated = storage.updateMessageStatus(msg.id, 'delivered');
       if (!updated) return;
       
       this.messageBroadcaster(userName, { type: 'private_message', message: updated });
@@ -47,7 +50,7 @@ class ChatService {
   }
 
   markAsSeen(messageId, to) {
-    const updated = messageRepository.updateStatus(messageId, 'seen');
+    const updated = storage.updateMessageStatus(messageId, 'seen');
     if (updated && this.messageBroadcaster) {
       this.messageBroadcaster(to, { type: 'message-status', messageId, status: 'seen' });
     }
