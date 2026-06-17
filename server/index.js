@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const { ApolloServer } = require('@apollo/server');
 // Cambiamos la importación a la forma estándar para evitar el error de ruta
-const { expressMiddleware } = require('@apollo/server/express4');
+const { expressMiddleware } = require('@as-integrations/express4');
 const bodyParser = require('body-parser');
 const { makeExecutableSchema } = require('@graphql-tools/schema');
 const { typeDefs } = require('./graphql/schema');
