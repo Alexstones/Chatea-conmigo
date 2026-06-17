@@ -2,21 +2,31 @@
   "name": "chat-publico",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "npm-run-all --parallel dev:frontend dev:server",
     "dev:frontend": "vite",
     "dev:server": "node server/index.js",
-    "start": "npm run dev"
+    "build": "vite build",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "@apollo/server": "^5.5.1",
+    "@graphql-tools/schema": "^10.0.33",
+    "body-parser": "^2.3.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "graphql": "^16.14.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.2",
     "concurrently": "^8.2.0",
     "npm-run-all": "^4.1.5",
     "vite": "^8.0.16"
-  },
-  "dependencies": {
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "ws": "^8.21.0"
   }
 }
